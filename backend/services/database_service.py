@@ -72,6 +72,22 @@ class DatabaseService:
             self.db[Config.MONGODB_COLLECTIONS['predictions']].create_index('analysis_id')
             self.db[Config.MONGODB_COLLECTIONS['predictions']].create_index('created_at')
             
+            # Datasets collection indexes
+            self.db[Config.MONGODB_COLLECTIONS['datasets']].create_index('dataset_id', unique=True)
+            self.db[Config.MONGODB_COLLECTIONS['datasets']].create_index('uploaded_at')
+            
+            # Component records indexes
+            self.db[Config.MONGODB_COLLECTIONS['component_records']].create_index('component_id')
+            self.db[Config.MONGODB_COLLECTIONS['component_records']].create_index('lot_id')
+            self.db[Config.MONGODB_COLLECTIONS['component_records']].create_index('dataset_id')
+            self.db[Config.MONGODB_COLLECTIONS['component_records']].create_index('created_at')
+            
+            # Analysis results indexes
+            self.db[Config.MONGODB_COLLECTIONS['analysis_results']].create_index('component_id')
+            self.db[Config.MONGODB_COLLECTIONS['analysis_results']].create_index('lot_id')
+            self.db[Config.MONGODB_COLLECTIONS['analysis_results']].create_index('created_at')
+            self.db[Config.MONGODB_COLLECTIONS['analysis_results']].create_index([('created_at', -1)])
+            
             print("✓ Database indexes created")
         except Exception as e:
             print(f"⚠ Index creation warning: {e}")
@@ -289,3 +305,163 @@ class DatabaseService:
         except Exception as e:
             print(f"Error clearing old data: {e}")
             return 0
+    
+    # ============ DATASET OPERATIONS ============
+    
+    def save_dataset_metadata(self, dataset_id, filename, total_records, total_components, total_lots):
+        """Save dataset metadata"""
+        if not self.is_connected:
+            return None
+        
+        try:
+            collection = self.db[Config.MONGODB_COLLECTIONS['datasets']]
+            
+            document = {
+                'dataset_id': dataset_id,
+                'filename': filename,
+                'total_records': total_records,
+                'total_components': total_components,
+                'total_lots': total_lots,
+                'uploaded_at': datetime.utcnow(),
+                'source': 'user_upload'
+            }
+            
+            result = collection.insert_one(document)
+            return str(result.inserted_id)
+        except Exception as e:
+            print(f"Error saving dataset metadata: {e}")
+            return None
+    
+    def save_component_records(self, records):
+        """Save multiple component records from CSV"""
+        if not self.is_connected:
+            return 0
+        
+        try:
+            collection = self.db[Config.MONGODB_COLLECTIONS['component_records']]
+            
+            if not records:
+                return 0
+            
+            # Add metadata to each record
+            for record in records:
+                if 'created_at' not in record:
+                    record['created_at'] = datetime.utcnow()
+            
+            result = collection.insert_many(records)
+            return len(result.inserted_ids)
+        except Exception as e:
+            print(f"Error saving component records: {e}")
+            return 0
+    
+    def get_component_records(self, limit=100, skip=0, search_term=None):
+        """Get component records with pagination and search"""
+        if not self.is_connected:
+            return []
+        
+        try:
+            collection = self.db[Config.MONGODB_COLLECTIONS['component_records']]
+            
+            query = {}
+            if search_term:
+                query = {
+                    '$or': [
+                        {'component_id': {'$regex': search_term, '$options': 'i'}},
+                        {'lot_id': {'$regex': search_term, '$options': 'i'}}
+                    ]
+                }
+            
+            records = collection.find(query).skip(skip).limit(limit).sort('created_at', -1)
+            return list(records)
+        except Exception as e:
+            print(f"Error retrieving component records: {e}")
+            return []
+    
+    def get_component_by_id(self, component_id):
+        """Get all records for a specific component"""
+        if not self.is_connected:
+            return []
+        
+        try:
+            collection = self.db[Config.MONGODB_COLLECTIONS['component_records']]
+            records = collection.find({'component_id': component_id}).sort('time_hours', 1)
+            return list(records)
+        except Exception as e:
+            print(f"Error retrieving component records: {e}")
+            return []
+    
+    def save_analysis_result(self, component_id, module_a, module_b, final_risk, explanation, recommendation):
+        """Save analysis result"""
+        if not self.is_connected:
+            return None
+        
+        try:
+            collection = self.db[Config.MONGODB_COLLECTIONS['analysis_results']]
+            
+            document = {
+                'component_id': component_id,
+                'lot_id': module_a.get('lot_id', ''),
+                'module_a': module_a,
+                'module_b': module_b,
+                'final_risk': final_risk,
+                'explanation': explanation,
+                'recommendation': recommendation,
+                'created_at': datetime.utcnow()
+            }
+            
+            result = collection.insert_one(document)
+            return str(result.inserted_id)
+        except Exception as e:
+            print(f"Error saving analysis result: {e}")
+            return None
+    
+    def get_analysis_result(self, analysis_id):
+        """Get a specific analysis result"""
+        if not self.is_connected:
+            return None
+        
+        try:
+            collection = self.db[Config.MONGODB_COLLECTIONS['analysis_results']]
+            doc = collection.find_one({'_id': ObjectId(analysis_id)})
+            if doc:
+                doc['_id'] = str(doc['_id'])
+            return doc
+        except Exception as e:
+            print(f"Error retrieving analysis result: {e}")
+            return None
+    
+    def get_component_analysis_results(self, component_id, limit=50):
+        """Get all analysis results for a component"""
+        if not self.is_connected:
+            return []
+        
+        try:
+            collection = self.db[Config.MONGODB_COLLECTIONS['analysis_results']]
+            results = collection.find({'component_id': component_id}).limit(limit).sort('created_at', -1)
+            
+            result_list = []
+            for doc in results:
+                doc['_id'] = str(doc['_id'])
+                result_list.append(doc)
+            return result_list
+        except Exception as e:
+            print(f"Error retrieving component analyses: {e}")
+            return []
+    
+    def get_all_analysis_results(self, limit=50):
+        """Get all analysis results"""
+        if not self.is_connected:
+            return []
+        
+        try:
+            collection = self.db[Config.MONGODB_COLLECTIONS['analysis_results']]
+            results = collection.find().limit(limit).sort('created_at', -1)
+            
+            result_list = []
+            for doc in results:
+                doc['_id'] = str(doc['_id'])
+                result_list.append(doc)
+            return result_list
+        except Exception as e:
+            print(f"Error retrieving analyses: {e}")
+            return []

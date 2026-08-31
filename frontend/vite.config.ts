@@ -34,6 +34,17 @@ export default defineConfig(({ mode }) => {
       port: parseInt(process.env.PORT || '8443'),
       strictPort: true,
       watch: { ignored: ['**/.figma/**'] },
+      // Keep local API requests same-origin, avoiding browser CORS preflights.
+      proxy: {
+        '/api': {
+          target: 'http://localhost:5000',
+          changeOrigin: true,
+        },
+        '/health': {
+          target: 'http://localhost:5000',
+          changeOrigin: true,
+        },
+      },
     },
     preview: {
       host: '0.0.0.0',

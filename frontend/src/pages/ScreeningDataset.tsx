@@ -1,6 +1,8 @@
+import { useState } from 'react';
 import { PageProps } from '../types';
 import { DATASET_SUMMARY, SHOWCASE_COMPONENTS } from '../data';
-import { ComponentRecord } from '../types';
+import { ComponentRecord, DatabaseComponentRecord } from '../types';
+import { analyzeComponent, getComponents, uploadDataset } from '../services/api';
 
 // Deterministic helpers — same seed approach as data.ts
 function sr(n: number): number {
@@ -34,6 +36,37 @@ function componentStatus(c: ComponentRecord): string {
   if (c.classification === 'MODULE_A') return 'Outlier';
   if (c.classification === 'MODULE_B') return 'Latent Defect';
   return 'Normal';
+}
+
+function toStatusBadgeLabel(status: string): string {
+  const normalized = status?.toString().trim().toUpperCase();
+  if (normalized === 'MODULE_A' || normalized === 'OUTLIER') return 'Outlier';
+  if (normalized === 'MODULE_B' || normalized === 'LATENT_DEFECT' || normalized === 'HIGH_RISK') return 'Latent Defect';
+  return 'Normal';
+}
+
+type DatasetRow = {
+  Component_ID: string;
+  Lot_ID: string;
+  Time_Hours: number;
+  Burn_In_Temperature_C: number;
+  Iddq_uA: number;
+  Leakage_Current_uA: number;
+  Propagation_Delay_ns: number;
+  Component_Status: string;
+};
+
+function mapDatabaseRows(records: DatabaseComponentRecord[]): DatasetRow[] {
+  return records.map(record => ({
+    Component_ID: record.component_id,
+    Lot_ID: record.lot_id,
+    Time_Hours: Number(record.time_hours),
+    Burn_In_Temperature_C: Number(record.burn_in_temperature_c),
+    Iddq_uA: Number(record.iddq_ua),
+    Leakage_Current_uA: Number(record.leakage_current_ua),
+    Propagation_Delay_ns: Number(record.propagation_delay_ns),
+    Component_Status: record.component_status || 'NORMAL',
+  }));
 }
 
 // 6 representative sample rows (static, new schema)
@@ -81,12 +114,122 @@ function StatusBadge({ status, small = false }: { status: string; small?: boolea
 }
 
 export default function ScreeningDataset({ onNavigate, addToast }: PageProps) {
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState('No file selected');
+  const [datasetRows, setDatasetRows] = useState<DatasetRow[]>(() => SHOWCASE_COMPONENTS.map(c => ({
+    Component_ID: c.id,
+    Lot_ID: c.lotLabel,
+    Time_Hours: 168,
+    Burn_In_Temperature_C: 100,
+    Iddq_uA: c.value_0h,
+    Leakage_Current_uA: c.value_168h,
+    Propagation_Delay_ns: 0,
+    Component_Status: componentStatus(c),
+  })));
+  const [datasetStats, setDatasetStats] = useState({
+    totalRecords: 600,
+    totalComponents: 600,
+    totalLots: 15,
+  });
+
+  const refreshDatasetTable = async () => {
+    try {
+      const response = await getComponents(1, 500);
+      if (!response?.success || !Array.isArray(response.components) || response.components.length === 0) {
+        return { success: false, rows: [] as DatasetRow[] };
+      }
+
+      const nextRows = mapDatabaseRows(response.components);
+      setDatasetRows(nextRows);
+      setDatasetStats({
+        totalRecords: nextRows.length,
+        totalComponents: new Set(nextRows.map(row => row.Component_ID)).size,
+        totalLots: new Set(nextRows.map(row => row.Lot_ID)).size,
+      });
+      return { success: true, rows: nextRows };
+    } catch {
+      return { success: false, rows: [] as DatasetRow[] };
+    }
+  };
+
+  const handleUpload = async () => {
+    if (!selectedFile) {
+      addToast('Please choose a CSV file first.', 'warning');
+      setUploadStatus('No file selected');
+      return;
+    }
+
+    setIsUploading(true);
+    setUploadStatus('Uploading and validating CSV…');
+
+    try {
+      const result = await uploadDataset(selectedFile);
+      setDatasetStats({
+        totalRecords: result.total_records,
+        totalComponents: result.total_components,
+        totalLots: result.total_lots,
+      });
+
+      const refreshed = await refreshDatasetTable();
+      const analysisTargets = refreshed.success
+        ? Array.from(new Set(refreshed.rows.map(row => row.Component_ID)))
+        : [];
+
+      let analyzedCount = 0;
+      for (const componentId of analysisTargets) {
+        try {
+          await analyzeComponent(componentId);
+          analyzedCount += 1;
+        } catch {
+          // Continue even if one component analysis fails.
+        }
+      }
+
+      const statusMessage = `${result.message || 'Dataset uploaded and validated'} — ${result.total_records} records • ${result.total_components} components • ${result.total_lots} lots${analysisTargets.length ? ` • AI analysis run for ${analyzedCount}/${analysisTargets.length} components` : ''}`;
+      setUploadStatus(statusMessage);
+      addToast(statusMessage, 'success');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Upload failed';
+      setUploadStatus(message);
+      addToast(message, 'error');
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
   return (
     <div className="p-6 max-w-screen-xl">
       <div className="mb-6">
         <h1 className="text-3xl font-display font-bold text-navy-900 tracking-tight">Screening Dataset</h1>
         <p className="text-navy-400 mt-1 text-sm">Burn-in test records used to train and evaluate ISRO RELI-AI.</p>
       </div>
+
+      <div className="mb-5 p-4 bg-white border border-border rounded-2xl flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <div className="flex items-center gap-3 flex-wrap">
+          <input id="csv-upload-input" type="file" accept=".csv" className="hidden" onChange={(e) => {
+            const file = e.target.files?.[0] || null;
+            setSelectedFile(file);
+            setUploadStatus(file ? file.name : 'No file selected');
+          }} />
+          <label htmlFor="csv-upload-input" className="px-4 py-2 bg-navy-800 hover:bg-navy-700 text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer">
+            Choose CSV
+          </label>
+          <span className="text-xs font-mono text-navy-600 bg-ice-100 border border-border-light px-2.5 py-1.5 rounded-lg min-w-[180px] truncate">
+            {selectedFile ? selectedFile.name : 'No file selected'}
+          </span>
+        </div>
+
+        <button
+          onClick={handleUpload}
+          disabled={isUploading}
+          className="px-4 py-2 bg-saffron-500 hover:bg-saffron-600 disabled:opacity-60 text-white text-xs font-semibold rounded-xl transition-colors"
+        >
+          {isUploading ? 'Uploading…' : 'Upload & Validate'}
+        </button>
+      </div>
+
+      <div className="mb-4 text-xs font-mono text-navy-600">{uploadStatus}</div>
 
       {/* Dataset note */}
       <div className="mb-5 p-4 bg-amber-50 border border-amber-200 rounded-2xl flex gap-3">
@@ -105,11 +248,11 @@ export default function ScreeningDataset({ onNavigate, addToast }: PageProps) {
       {/* Summary stats */}
       <div className="grid grid-cols-5 gap-4 mb-5">
         {[
-          { label: 'Total Components', value: '600', sub: 'Across all lots' },
-          { label: 'Lots', value: '15', sub: '40 components each' },
+          { label: 'Total Records', value: String(datasetStats.totalRecords), sub: 'Uploaded data rows' },
+          { label: 'Total Components', value: String(datasetStats.totalComponents), sub: 'Across all lots' },
+          { label: 'Lots', value: String(datasetStats.totalLots), sub: 'Unique lot groups' },
           { label: 'Normal', value: '555', sub: `${((555 / 600) * 100).toFixed(1)}% of total` },
           { label: 'Outliers', value: '15', sub: 'High Iddq at 0h' },
-          { label: 'Latent Defects', value: '30', sub: 'Drift-flagged by GB' },
         ].map(s => (
           <div key={s.label} className="bg-white rounded-2xl border border-border p-5">
             <div className="text-[10px] font-mono text-navy-400 uppercase tracking-widest">{s.label}</div>
@@ -166,28 +309,26 @@ export default function ScreeningDataset({ onNavigate, addToast }: PageProps) {
                 </tr>
               </thead>
               <tbody>
-                {SHOWCASE_COMPONENTS.map(c => {
-                  const status = componentStatus(c);
-                  const temp = burnInTemp(c.lot);
-                  const delay = propDelay(c);
+                {datasetRows.map((row, idx) => {
+                  const status = toStatusBadgeLabel(row.Component_Status);
                   return (
-                    <tr key={c.id} className="border-b border-border-light hover:bg-ice-50 transition-colors">
-                      <td className="py-1.5 px-2 font-mono font-bold text-navy-900 whitespace-nowrap">{c.id}</td>
-                      <td className="py-1.5 px-2 font-mono text-navy-600 whitespace-nowrap">{c.lotLabel}</td>
+                    <tr key={`${row.Component_ID}-${row.Time_Hours}-${idx}`} className="border-b border-border-light hover:bg-ice-50 transition-colors">
+                      <td className="py-1.5 px-2 font-mono font-bold text-navy-900 whitespace-nowrap">{row.Component_ID}</td>
+                      <td className="py-1.5 px-2 font-mono text-navy-600 whitespace-nowrap">{row.Lot_ID}</td>
                       <td className="py-1.5 px-2 font-mono text-navy-900 text-right tabular-nums whitespace-nowrap">
-                        168<span className="text-navy-400 text-[9px] ml-0.5">h</span>
+                        {row.Time_Hours}<span className="text-navy-400 text-[9px] ml-0.5">h</span>
                       </td>
                       <td className="py-1.5 px-2 font-mono text-navy-900 text-right tabular-nums whitespace-nowrap">
-                        {temp}<span className="text-navy-400 text-[9px] ml-0.5">°C</span>
+                        {row.Burn_In_Temperature_C.toFixed(0)}<span className="text-navy-400 text-[9px] ml-0.5">°C</span>
                       </td>
                       <td className="py-1.5 px-2 font-mono text-navy-900 text-right tabular-nums whitespace-nowrap">
-                        {c.value_0h.toFixed(2)}<span className="text-navy-400 text-[9px] ml-0.5">µA</span>
+                        {row.Iddq_uA.toFixed(2)}<span className="text-navy-400 text-[9px] ml-0.5">µA</span>
                       </td>
                       <td className="py-1.5 px-2 font-mono text-navy-900 text-right tabular-nums whitespace-nowrap">
-                        {c.value_168h.toFixed(2)}<span className="text-navy-400 text-[9px] ml-0.5">µA</span>
+                        {row.Leakage_Current_uA.toFixed(2)}<span className="text-navy-400 text-[9px] ml-0.5">µA</span>
                       </td>
                       <td className="py-1.5 px-2 font-mono text-navy-900 text-right tabular-nums whitespace-nowrap">
-                        {delay}<span className="text-navy-400 text-[9px] ml-0.5">ns</span>
+                        {row.Propagation_Delay_ns.toFixed(2)}<span className="text-navy-400 text-[9px] ml-0.5">ns</span>
                       </td>
                       <td className="py-1.5 px-2">
                         <StatusBadge status={status} small />

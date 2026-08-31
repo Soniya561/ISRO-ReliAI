@@ -7,7 +7,7 @@ Main Flask application
 from flask import Flask
 from flask_cors import CORS
 from config import Config
-from routes import health_routes, prediction_routes, database_routes
+from routes import health_routes, prediction_routes, database_routes, dataset_routes
 
 def create_app(config_class=Config):
     """Application factory"""
@@ -28,6 +28,7 @@ def create_app(config_class=Config):
     app.register_blueprint(health_routes.bp)
     app.register_blueprint(prediction_routes.bp)
     app.register_blueprint(database_routes.bp)
+    app.register_blueprint(dataset_routes.bp)
     
     return app
 

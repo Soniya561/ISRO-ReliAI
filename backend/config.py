@@ -22,16 +22,23 @@ class Config:
         FRONTEND_URL,
         'http://localhost:3000',
         'http://localhost:5173',
+        'http://localhost:8443',
         'http://127.0.0.1:3000',
         'http://127.0.0.1:5173',
+        'http://127.0.0.1:8443',
     ]
     
     # MongoDB configuration
-    MONGODB_URL = os.getenv('MONGODB_URL', 'mongodb://localhost:27017')
-    MONGODB_DB = os.getenv('MONGODB_DB', 'isro_reliai')
+    MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb://localhost:27017')
+    MONGODB_URL = MONGODB_URI  # Keep for backwards compatibility
+    DATABASE_NAME = os.getenv('DATABASE_NAME', 'isro_reliai')
+    MONGODB_DB = DATABASE_NAME  # Use DATABASE_NAME as primary
     
     # Collections
     MONGODB_COLLECTIONS = {
+        'datasets': 'datasets',
+        'component_records': 'component_records',
+        'analysis_results': 'analysis_results',
         'components': 'components',
         'analyses': 'analyses',
         'predictions': 'predictions'
