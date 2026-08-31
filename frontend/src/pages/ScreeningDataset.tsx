@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { PageProps } from '../types';
 import { DATASET_SUMMARY, SHOWCASE_COMPONENTS } from '../data';
-import { ComponentRecord, DatabaseComponentRecord } from '../types';
+import { AnalysisResponse, ComponentRecord, DatabaseComponentRecord } from '../types';
 import { analyzeComponent, getComponents, uploadDataset } from '../services/api';
 
 // Deterministic helpers — same seed approach as data.ts
@@ -56,6 +56,32 @@ type DatasetRow = {
   Component_Status: string;
 };
 
+type RiskLevel = 'NORMAL' | 'WARNING' | 'HIGH_RISK' | 'ERROR';
+
+type SignalTone = 'normal' | 'warning' | 'high';
+
+type ModelSignal = {
+  label: string;
+  value: number;
+  detail: string;
+  tone: SignalTone;
+};
+
+type ModelInsights = {
+  assessedAt: string;
+  analyzedCount: number;
+  targetCount: number;
+  overallRisk: RiskLevel;
+  confidence: number;
+  riskCounts: Record<RiskLevel, number>;
+  signals: ModelSignal[];
+  focusComponent: string;
+  focusLot: string;
+  explanation: string;
+  recommendation: string;
+  source: string;
+};
+
 function mapDatabaseRows(records: DatabaseComponentRecord[]): DatasetRow[] {
   return records.map(record => ({
     Component_ID: record.component_id,
@@ -96,6 +122,136 @@ const NUM_UNITS: Record<string, string> = {
   Time_Hours: 'h',
 };
 
+const RISK_COPY: Record<RiskLevel, { label: string; bg: string; border: string; text: string; fill: string; chip: string }> = {
+  NORMAL: {
+    label: 'Normal',
+    bg: 'bg-teal-50',
+    border: 'border-teal-200',
+    text: 'text-teal-800',
+    fill: 'bg-teal-500',
+    chip: 'bg-teal-100 text-teal-800 border-teal-200',
+  },
+  WARNING: {
+    label: 'Warning',
+    bg: 'bg-saffron-50',
+    border: 'border-saffron-200',
+    text: 'text-saffron-800',
+    fill: 'bg-saffron-500',
+    chip: 'bg-saffron-100 text-saffron-800 border-saffron-200',
+  },
+  HIGH_RISK: {
+    label: 'High Risk',
+    bg: 'bg-red-50',
+    border: 'border-red-200',
+    text: 'text-red-800',
+    fill: 'bg-red-500',
+    chip: 'bg-red-100 text-red-800 border-red-200',
+  },
+  ERROR: {
+    label: 'Needs Review',
+    bg: 'bg-navy-50',
+    border: 'border-navy-200',
+    text: 'text-navy-800',
+    fill: 'bg-navy-500',
+    chip: 'bg-navy-100 text-navy-800 border-navy-200',
+  },
+};
+
+function normalizeRiskLevel(value: string | undefined): RiskLevel {
+  const normalized = value?.toString().trim().toUpperCase();
+  if (normalized === 'HIGH_RISK' || normalized === 'HIGH RISK') return 'HIGH_RISK';
+  if (normalized === 'WARNING') return 'WARNING';
+  if (normalized === 'NORMAL') return 'NORMAL';
+  return 'ERROR';
+}
+
+function riskRank(value: RiskLevel): number {
+  return value === 'HIGH_RISK' ? 3 : value === 'WARNING' ? 2 : value === 'ERROR' ? 1 : 0;
+}
+
+function pct(count: number, total: number): number {
+  if (!total) return 0;
+  return Math.round((count / total) * 100);
+}
+
+function formatClock(date = new Date()): string {
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function buildDemoInsights(): ModelInsights {
+  const total = SHOWCASE_COMPONENTS.length;
+  const moduleA = SHOWCASE_COMPONENTS.filter(c => c.classification === 'MODULE_A').length;
+  const moduleB = SHOWCASE_COMPONENTS.filter(c => c.classification === 'MODULE_B').length;
+  const normal = total - moduleA - moduleB;
+  const focus = SHOWCASE_COMPONENTS.find(c => c.classification === 'MODULE_B') ?? SHOWCASE_COMPONENTS[0];
+
+  return {
+    assessedAt: 'Demo baseline',
+    analyzedCount: total,
+    targetCount: total,
+    overallRisk: moduleA || moduleB ? 'WARNING' : 'NORMAL',
+    confidence: 0,
+    riskCounts: { NORMAL: normal, WARNING: moduleA + moduleB, HIGH_RISK: 0, ERROR: 0 },
+    signals: [
+      { label: 'Module A anomaly flags', value: pct(moduleA, total), detail: `${moduleA}/${total} components`, tone: moduleA ? 'warning' : 'normal' },
+      { label: 'Module B drift flags', value: pct(moduleB, total), detail: `${moduleB}/${total} components`, tone: moduleB ? 'warning' : 'normal' },
+      { label: 'Normal classifications', value: pct(normal, total), detail: `${normal}/${total} components`, tone: 'normal' },
+    ],
+    focusComponent: focus.id,
+    focusLot: focus.lotLabel,
+    explanation: focus.explanation,
+    recommendation: 'Upload a CSV and run validation to replace this demo baseline with backend model output.',
+    source: 'Showcase dataset preview',
+  };
+}
+
+function buildModelInsights(results: AnalysisResponse[], targetCount: number): ModelInsights {
+  const analyzed = results.filter(result => result?.success !== false);
+  if (!analyzed.length) return buildDemoInsights();
+
+  const riskCounts: Record<RiskLevel, number> = { NORMAL: 0, WARNING: 0, HIGH_RISK: 0, ERROR: 0 };
+  analyzed.forEach(result => {
+    riskCounts[normalizeRiskLevel(result.final_risk)] += 1;
+  });
+
+  const moduleAFlags = analyzed.filter(result => Boolean(result.module_a?.anomaly)).length;
+  const moduleBWarnings = analyzed.filter(result => {
+    const prediction = normalizeRiskLevel(result.module_b?.prediction);
+    return prediction === 'WARNING' || prediction === 'HIGH_RISK';
+  }).length;
+  const highRisk = riskCounts.HIGH_RISK;
+  const warning = riskCounts.WARNING;
+  const overallRisk: RiskLevel = highRisk > 0 ? 'HIGH_RISK' : warning > 0 ? 'WARNING' : riskCounts.ERROR > 0 ? 'ERROR' : 'NORMAL';
+  const confidenceValues = analyzed.map(result => Number(result.confidence || result.module_b?.confidence || 0)).filter(Number.isFinite);
+  const confidence = confidenceValues.length
+    ? confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length
+    : 0;
+  const focus = [...analyzed].sort((a, b) => {
+    const rankDiff = riskRank(normalizeRiskLevel(b.final_risk)) - riskRank(normalizeRiskLevel(a.final_risk));
+    if (rankDiff !== 0) return rankDiff;
+    return Number(b.confidence || 0) - Number(a.confidence || 0);
+  })[0];
+
+  return {
+    assessedAt: formatClock(),
+    analyzedCount: analyzed.length,
+    targetCount,
+    overallRisk,
+    confidence,
+    riskCounts,
+    signals: [
+      { label: 'Final warning/high-risk decisions', value: pct(warning + highRisk, analyzed.length), detail: `${warning + highRisk}/${analyzed.length} components`, tone: highRisk ? 'high' : warning ? 'warning' : 'normal' },
+      { label: 'Module A anomaly flags', value: pct(moduleAFlags, analyzed.length), detail: `${moduleAFlags}/${analyzed.length} components`, tone: moduleAFlags ? 'warning' : 'normal' },
+      { label: 'Module B drift-risk predictions', value: pct(moduleBWarnings, analyzed.length), detail: `${moduleBWarnings}/${analyzed.length} components`, tone: moduleBWarnings ? 'warning' : 'normal' },
+    ],
+    focusComponent: focus.component_id,
+    focusLot: focus.lot_id || 'Lot unavailable',
+    explanation: focus.explanation || 'The model completed analysis but did not return an explanation string.',
+    recommendation: focus.recommendation || 'Review the selected component in the Risk & Explainability page.',
+    source: 'Backend model output',
+  };
+}
+
 function ColHeader({ col }: { col: string }) {
   return (
     <th className={`py-2 px-2 font-mono font-bold text-navy-500 text-[10px] tracking-wide whitespace-nowrap ${RIGHT_COLS.has(col) ? 'text-right' : 'text-left'}`}>
@@ -110,6 +266,98 @@ function StatusBadge({ status, small = false }: { status: string; small?: boolea
     <span className={`inline-block px-1.5 py-0.5 rounded border font-mono font-semibold whitespace-nowrap ${b.bg} ${b.text} ${b.border} ${small ? 'text-[9px]' : 'text-[10px]'}`}>
       {b.label}
     </span>
+  );
+}
+
+function MetricRing({ label, value, tone }: { label: string; value: number; tone: SignalTone }) {
+  const color = tone === 'high' ? '#DC2626' : tone === 'warning' ? '#D97706' : '#14B8A6';
+  return (
+    <div className="flex flex-col items-center gap-1">
+      <div
+        className="h-16 w-16 rounded-full flex items-center justify-center bg-white"
+        style={{ background: `conic-gradient(${color} ${Math.min(Math.max(value, 0), 100)}%, #E8F1FA 0)` }}
+      >
+        <div className="h-12 w-12 rounded-full bg-white flex items-center justify-center text-sm font-mono font-bold text-navy-900">
+          {value}%
+        </div>
+      </div>
+      <div className="text-[10px] font-mono uppercase tracking-wide text-navy-500 text-center max-w-24 leading-tight">{label}</div>
+    </div>
+  );
+}
+
+function ModelInsightsPanel({ insights }: { insights: ModelInsights }) {
+  const risk = RISK_COPY[insights.overallRisk];
+  const confidencePct = insights.confidence > 0 ? Math.round(insights.confidence * 100) : 0;
+
+  return (
+    <div className="mb-5 grid grid-cols-12 gap-5">
+      <div className={`col-span-12 lg:col-span-5 rounded-2xl border p-6 ${risk.bg} ${risk.border}`}>
+        <div className="flex items-start justify-between gap-4 mb-5">
+          <div>
+            <div className="text-[10px] font-mono text-navy-500 uppercase tracking-widest mb-1">Model Assessment</div>
+            <h2 className={`text-3xl font-display font-bold tracking-tight ${risk.text}`}>{risk.label}</h2>
+            <p className="text-sm text-navy-600 mt-1">{insights.focusComponent} / {insights.focusLot}</p>
+          </div>
+          <span className={`border rounded-full px-3 py-1 text-[10px] font-mono font-bold uppercase tracking-wide ${risk.chip}`}>
+            {insights.source}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-3 gap-4 mb-5">
+          <MetricRing label="AI confidence" value={confidencePct} tone={insights.overallRisk === 'HIGH_RISK' ? 'high' : insights.overallRisk === 'WARNING' ? 'warning' : 'normal'} />
+          <MetricRing label="Warning risk" value={pct(insights.riskCounts.WARNING, insights.analyzedCount)} tone={insights.riskCounts.WARNING ? 'warning' : 'normal'} />
+          <MetricRing label="High risk" value={pct(insights.riskCounts.HIGH_RISK, insights.analyzedCount)} tone={insights.riskCounts.HIGH_RISK ? 'high' : 'normal'} />
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 text-xs font-mono">
+          <div className="rounded-xl bg-white/70 border border-white px-3 py-2">
+            <div className="text-navy-400 uppercase tracking-wide text-[9px]">Components analyzed</div>
+            <div className="text-navy-900 font-bold mt-0.5">{insights.analyzedCount}/{insights.targetCount}</div>
+          </div>
+          <div className="rounded-xl bg-white/70 border border-white px-3 py-2">
+            <div className="text-navy-400 uppercase tracking-wide text-[9px]">Assessed at</div>
+            <div className="text-navy-900 font-bold mt-0.5">{insights.assessedAt}</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="col-span-12 lg:col-span-7 bg-white rounded-2xl border border-border p-6">
+        <div className="flex items-start justify-between gap-4 mb-4">
+          <div>
+            <h2 className="font-display font-semibold text-navy-900">Why This Risk?</h2>
+            <p className="text-xs text-navy-400 mt-1">Aggregated signals returned by the backend model run</p>
+          </div>
+          <span className={`border rounded-full px-3 py-1 text-[10px] font-mono font-bold uppercase tracking-wide ${risk.chip}`}>
+            Focus {insights.focusComponent}
+          </span>
+        </div>
+
+        <div className="space-y-3 mb-4">
+          {insights.signals.map(signal => {
+            const tone = signal.tone === 'high' ? RISK_COPY.HIGH_RISK : signal.tone === 'warning' ? RISK_COPY.WARNING : RISK_COPY.NORMAL;
+            return (
+              <div key={signal.label}>
+                <div className="flex justify-between gap-3 text-xs mb-1">
+                  <span className="text-navy-700">{signal.label}</span>
+                  <span className="font-mono font-bold text-navy-900">{signal.detail}</span>
+                </div>
+                <div className="h-2 rounded-full bg-ice-100 overflow-hidden">
+                  <div className={`h-full rounded-full ${tone.fill}`} style={{ width: `${Math.min(Math.max(signal.value, 2), 100)}%` }} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="bg-ice-50 rounded-xl border border-border-light p-4">
+          <div className="text-[10px] font-mono font-bold text-navy-500 uppercase tracking-wide mb-2">Model explanation</div>
+          <p className="text-sm text-navy-700 leading-relaxed mb-3">{insights.explanation}</p>
+          <div className="text-[10px] font-mono font-bold text-navy-500 uppercase tracking-wide mb-1">Recommended action</div>
+          <p className="text-sm text-navy-700 leading-relaxed">{insights.recommendation}</p>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -132,6 +380,7 @@ export default function ScreeningDataset({ onNavigate, addToast }: PageProps) {
     totalComponents: 600,
     totalLots: 15,
   });
+  const [modelInsights, setModelInsights] = useState<ModelInsights>(() => buildDemoInsights());
 
   const refreshDatasetTable = async () => {
     try {
@@ -177,13 +426,19 @@ export default function ScreeningDataset({ onNavigate, addToast }: PageProps) {
         : [];
 
       let analyzedCount = 0;
+      const analysisResults: AnalysisResponse[] = [];
       for (const componentId of analysisTargets) {
         try {
-          await analyzeComponent(componentId);
+          const analysis = await analyzeComponent(componentId);
+          analysisResults.push(analysis);
           analyzedCount += 1;
         } catch {
           // Continue even if one component analysis fails.
         }
+      }
+
+      if (analysisResults.length) {
+        setModelInsights(buildModelInsights(analysisResults, analysisTargets.length));
       }
 
       const statusMessage = `${result.message || 'Dataset uploaded and validated'} — ${result.total_records} records • ${result.total_components} components • ${result.total_lots} lots${analysisTargets.length ? ` • AI analysis run for ${analyzedCount}/${analysisTargets.length} components` : ''}`;
@@ -230,6 +485,8 @@ export default function ScreeningDataset({ onNavigate, addToast }: PageProps) {
       </div>
 
       <div className="mb-4 text-xs font-mono text-navy-600">{uploadStatus}</div>
+
+      <ModelInsightsPanel insights={modelInsights} />
 
       {/* Dataset note */}
       <div className="mb-5 p-4 bg-amber-50 border border-amber-200 rounded-2xl flex gap-3">
